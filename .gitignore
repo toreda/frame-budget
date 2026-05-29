@@ -1,0 +1,13 @@
+node_modules/
+coverage/
+*.lcov
+*.pid
+*.seed
+*.log
+.npm
+dist/
+!docs/dist/
+*.tsbuildinfo
+test-report.xml
+junit.xml
+.webpack/

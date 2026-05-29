@@ -1,0 +1,41 @@
+# Reference materials & internal docs
+_docs/
+_features/
+_references/
+docs/
+examples/
+assets/
+CLAUDE.md
+TODO.md
+
+# Source & build config — users rebuild from GitHub, not the tarball
+src/
+tests/
+scripts/
+tsconfig.json
+tsconfig.v6.json
+tsconfig.v7.json
+tsconfig.v8.json
+webpack.config.ts
+eslint.config.js
+jest.config.ts
+
+# Build artifacts that aren't the published one
+coverage/
+*.tsbuildinfo
+junit.xml
+
+# CI/CD & workspace
+.github/
+.claude/
+.gitattributes
+*.code-workspace
+
+# Editor & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
