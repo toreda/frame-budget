@@ -22,10 +22,11 @@ itself** with the registry — categories, systems, and workers come from the
 consumers, not from the package.
 
 It is a passive structure with respect to execution: it does **not** decide who
-runs each frame. The [`FrameScheduler`](./scheduler.md) reads the registry to resolve
-execution order, and [`FrameBroker`](./broker.md) tracks the remaining time. The
-registry's job is to make the taxonomy, config, and workers queryable in
-priority order.
+runs each frame. The [`FrameScheduler`](./scheduler.md) reads the registry at
+[schedule build](./scheduler.md#schedule-build) to resolve execution order; the
+[`FrameExecutor`](./executor.md) measures consumption and the scheduler adapts
+from it. The registry's job is to make the taxonomy, config, and workers
+queryable so the scheduler can sort them into priority order.
 
 ## Taxonomy
 
@@ -52,8 +53,11 @@ category
 Each registered **category**, **system**, and **worker** carries:
 
 - **`priority`** — optional unsigned int (higher = more important; default
-  `20`). Drives the scheduler's descending resolution order, the shared-pool
-  weight, and overflow shed order. See
+  `20`). Carried at **all three levels** — category and system priority order
+  their respective iterations, not just workers. Drives the scheduler's
+  descending resolution order, the shared-pool weight, and overflow shed order.
+  **Ties break alphabetically by name**, so leaving every node at the default
+  priority yields deterministic **alphabetical** execution order. See
   [adaptive-budget.md → Priority](../features/adaptive-budget.md#priority).
 - **`fixedMin`** — non-adaptive hard floor (% or ms; default `0`); the bottom of
   the node's adaptive range.
@@ -99,10 +103,10 @@ execution.
 
 ## Relationship to other systems
 
-- [`FrameScheduler`](./scheduler.md) reads the registry each frame to resolve
-  allocation.
-- [`FrameBroker`](./broker.md) supplies remaining-time info the scheduler spends
-  against registered workers.
+- [`FrameScheduler`](./scheduler.md) reads the registry at schedule build to
+  resolve allocation.
+- [`FrameBroker`](./broker.md) owns the registry and supplies the per-frame
+  budget (`budgetMs`) the scheduler spends against registered workers.
 
 ## Open questions
 
@@ -117,4 +121,4 @@ execution.
 - **Worker function signature** — a worker is `() => boolean` (a bounded chunk
   per call; `true` = more work remains). The broker calls it repeatedly within
   budget; the boolean is both the keep-going and the demand signal.
-</content>
+  </content>

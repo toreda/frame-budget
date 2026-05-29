@@ -29,17 +29,40 @@ executor does not read the scheduler. There is no shared state between them.
 `FrameBroker` owns all three and **mediates every interaction** per frame. It is
 the only component that knows about the others — hence "broker."
 
+The mediation is done with **direct method calls and return values**, not an
+event bus — a deliberate choice to keep the per-frame hot path allocation-light
+in a latency-sensitive host loop. See
+[decisions → DEC-001](../decisions.md#dec-001--components-communicate-by-direct-calls--returns-not-events).
+
 ### Per-frame cycle
 
-Each frame, `FrameBroker`:
+The three components are physically isolated and never call each other; the
+broker is what passes information between them. Each frame the broker drives
+this exact sequence:
 
-1. **Get planned work** from the [`FrameScheduler`](./scheduler.md).
-2. **Pass that work to the [`FrameExecutor`](./executor.md)** to be done.
-3. **Call update on the scheduler** with the results — time consumed, what
-   completed, etc. — so the scheduler can update its plan for next time.
+1. **Get the schedule.** Call [`scheduler.getSchedule()`](./scheduler.md). The
+   scheduler returns its current plan, internally rebuilding it (via a private
+   `build()`) only when something changed — never every frame (see
+   [scheduler → schedule build](./scheduler.md#schedule-build)).
+2. **Execute, phase by phase.** The broker owns the ordered phase list and
+   iterates it. For each phase it calls
+   [`executor.executePhase(schedule, ctx, phaseWorkers)`](./executor.md), which
+   walks `category → system → worker` and runs the work. The broker carries the
+   per-frame [`FrameContext`](../../src/frame/context.ts) (`ctx`) across phases;
+   it is released when the frame ends.
+3. **Collect usage.** `executePhase` returns a **usage/consumption object**
+   (call counts + ms consumed, aggregated per worker → system → category →
+   phase — see [executor → usage object](./executor.md#usage-object)). The
+   broker accumulates these across phases for the frame.
+4. **Feed usage back.** The broker calls
+   [`scheduler.updateUsage(consumed)`](./scheduler.md#public-surface--the-broker-contract), which
+   triggers the scheduler's internal adaptive updates. For performance the
+   scheduler **may batch** stats and actually recompute only every `n` frames:
+   one frame of slight budget overrun that self-corrects the next frame is
+   cheaper than rebuilding the schedule every frame.
 
-(The [`FrameRegistry`](./registry.md) is likewise owned and updated by
-`FrameBroker`; how its `onUpdate` slots into the cycle is an open question.)
+(The [`FrameRegistry`](./registry.md) is the passive store the scheduler reads
+during `build()`; the broker does not push per-frame updates into it.)
 
 ## Construction — `FrameBrokerInit`
 
@@ -146,10 +169,12 @@ The budget **percentage** is a function (not a plain number) so callers can make
 the fraction vary over time (e.g. throttle under load) without re-calling the
 setter each frame.
 
-> **Open:** which component *tracks remaining ms* as work runs is not finalized.
-> Since the [`FrameExecutor`](./executor.md) is the only component that actually does
-> work (and thus spends time), tracking may belong there; `FrameBroker` supplies
-> the per-frame budget value (`budgetMs`). See open questions.
+> **Resolved.** The [`FrameExecutor`](./executor.md) **measures** consumption —
+> it wraps each [`executeWorker`](./executor.md) call in `performance.now()`
+> deltas and returns an aggregated [usage object](./executor.md#usage-object).
+> `FrameBroker` supplies the per-frame budget value (`budgetMs`) and relays the
+> measured usage to the scheduler. The executor only iterates and executes; the
+> scheduler owns adaptation based on the returned measurements.
 
 ## Diagnostics channel — `onDiagnostic`
 
@@ -193,22 +218,19 @@ brokers.
 - Adjust the budget at runtime: `setFps(fps, budgetPct?)` and `setBudgetPct`.
   _(Implemented.)_
 - A per-frame tick/update entry point that runs the cycle above. _(TODO.)_
-- Access to the budget value: `get fps` / `get budgetMs`. _(Implemented;
-  remaining-ms tracking still an open question on ownership.)_
+- Access to the budget value: `get fps` / `get budgetMs`. _(Implemented.)_
 
 ## Relationship to other systems
 
 - Owns and mediates all three components; they never communicate directly.
-- Pulls the plan from [`FrameScheduler`](./scheduler.md), hands it to the
-  [`FrameExecutor`](./executor.md), then reports results back to the scheduler.
-- Owns and updates the [`FrameRegistry`](./registry.md).
+- Each frame: `scheduler.getSchedule()` → iterate phases calling
+  `executor.executePhase(schedule, ctx, phaseWorkers)` → `scheduler.updateUsage(consumed)`
+  with the executor's returned [usage object](./executor.md#usage-object).
+- Owns the [`FrameRegistry`](./registry.md) as the passive store the scheduler
+  reads during its build.
 
 ## Open questions
 
-- How does the registry's `onUpdate` slot into the per-frame cycle relative to
-  the scheduler/executor steps?
-- Which component **tracks remaining time** as work runs (executor vs.
-  `FrameBroker` vs. a separate value)?
 - Time source: `performance.now()` vs. caller-supplied timestamps (for
   determinism/testability)?
 - Is one `FrameBroker` reused across frames (reset each frame) or created per

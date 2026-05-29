@@ -19,6 +19,7 @@ you can quickly identify which files to ingest for a task.
 | [_specs/main.md](_specs/main.md) | Entry point: project summary + index of all specs. |
 | [_specs/systems/](_specs/systems/) | One spec per major system (broker, registry, scheduler, executor). |
 | [_specs/features/](_specs/features/) | Feature specs (cross-system requirements + plans). |
+| [_specs/decisions.md](_specs/decisions.md) | Project-level design decision log (cross-cutting architectural choices). |
 
 Specs are ahead of the code: they capture intended design and open questions.
 Keep `_specs/main.md`'s index in sync when adding/renaming specs or source.
@@ -35,6 +36,7 @@ Keep `_specs/main.md`'s index in sync when adding/renaming specs or source.
 | [src/frame/scheduler.ts](src/frame/scheduler.ts) | `FrameScheduler` — per-frame planning engine (stub). |
 | [src/frame/executor.ts](src/frame/executor.ts) | `FrameExecutor` — stateless per-frame execution (scaffold). |
 | [src/frame/context.ts](src/frame/context.ts) | `FrameContext` — per-frame execution state (interface). |
+| [src/frame/usage.ts](src/frame/usage.ts) | Usage object types (`PhaseUsage`/`CategoryUsage`/`SystemUsage`/`WorkerUsage`) — executor→scheduler measurements. |
 | `tests/` | Tests mirror `src/` paths, named `*.spec.ts` (e.g. `src/frame/broker.ts` → `tests/frame/broker.spec.ts`). |
 
 ## Conventions

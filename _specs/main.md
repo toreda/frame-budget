@@ -55,6 +55,9 @@ read its spec, then open the source/test files it points to.
 - **Systems** (`_specs/systems/`) — one spec per major system/class.
 - **Features** (`_specs/features/`) — cross-cutting requirements and plans that
   may touch multiple systems; scoped to high-level requirements + plan.
+- **Decisions** ([decisions.md](decisions.md)) — project-level decision log:
+  cross-cutting architectural choices and the trade-offs accepted. Read it
+  before reworking how the components interact.
 
 ## Systems
 
@@ -79,6 +82,7 @@ read its spec, then open the source/test files it points to.
 | `tests/` | Tests mirroring `src/` paths, named `*.spec.ts` (e.g. `src/frame/broker.ts` → `tests/frame/broker.spec.ts`, `src/frame/registry.ts` → `tests/frame/registry.spec.ts`). |
 | `_specs/systems/` | One spec per major system. |
 | `_specs/features/` | Feature specs (cross-system requirements + plans). |
+| [_specs/decisions.md](decisions.md) | Project-level design decision log. |
 
 ## Status
 

@@ -1,4 +1,5 @@
 import {type FrameContext} from './context.js';
+import {type CategoryUsage, type PhaseUsage, type SystemUsage, type WorkerUsage} from './usage.js';
 
 /**
  * Performs the **stateless execution** of registered worker functions for a
@@ -10,20 +11,31 @@ import {type FrameContext} from './context.js';
  * once the frame ends, so the executor instance is freely reusable frame to
  * frame.
  *
- * ## What it executes
+ * ## Strictly iterate + execute + measure
  *
- * Execution is organized by the registry taxonomy `category → system → worker`,
- * cross-cut by **phase**. Each `execute*` method takes the frame's time
- * `budget` (ms), the per-frame `ctx`, and the group of things to execute, and
- * enforces **priority-ordered execution within the group**:
+ * The executor does **no** sorting, priority resolution, or allocation. Ordering
+ * is baked into the schedule at {@link FrameScheduler} build time; the executor
+ * walks the already-ordered structure it is handed. Its one extra job is
+ * **measurement** — it returns the consumed-time stats the scheduler needs to
+ * adapt.
  *
- * - {@link executeCategory} — run a category (its systems, in priority order).
- * - {@link executeSystem} — run a system (its workers, in priority order).
- * - {@link executePhase} — run all workers assigned to one phase, in priority
- *   order.
- * - {@link executeWorker} — run a single worker function. Called by a parent in
- *   the hierarchy, which wraps the call in `performance.now()` deltas to measure
- *   the worker's actual execution time (`deltaTime`).
+ * ## Execution hierarchy
+ *
+ * The broker iterates phases and calls {@link executePhase} for each; execution
+ * then descends the taxonomy, each level receiving the **minimum scoped
+ * information** it needs and returning its bottom-up usage rollup:
+ *
+ * - {@link executePhase} → {@link PhaseUsage} — iterate the phase's registered
+ *   categories.
+ * - {@link executeCategory} → {@link CategoryUsage} — iterate a category's
+ *   registered systems.
+ * - {@link executeSystem} → {@link SystemUsage} — iterate a system's registered
+ *   workers; **measures** each worker (`performance.now()` deltas around
+ *   {@link executeWorker}).
+ * - {@link executeWorker} → {@link WorkerUsage} — run **one** worker function.
+ *
+ * A phase iterates only the nodes actually **registered** to it; a phase with no
+ * registered workers has 0 objects to iterate.
  *
  * ## Why phases (vs. priority alone)
  *
@@ -36,23 +48,43 @@ import {type FrameContext} from './context.js';
  *
  * **Phases** sidestep that: execution is split into an arbitrary set of ordered
  * phases, and workers are assigned to a phase. Ordering by priority *within*
- * each phase each frame is far cheaper than resolving a dependency graph, while
- * still guaranteeing cross-phase order (everything in phase N runs before
- * phase N+1).
+ * each phase is far cheaper than resolving a dependency graph, while still
+ * guaranteeing cross-phase order (everything in phase N runs before phase N+1).
  *
  * @typeParam PhaseT - String union of the broker's phases.
  */
 export class FrameExecutor<PhaseT extends string = string> {
 	/**
-	 * Execute a category: run its systems in priority order within `budget`.
+	 * Execute a single phase: walk its registered categories (in schedule order)
+	 * within `budget` and return the phase-level usage rollup.
 	 *
-	 * @param budget - Time budget for this execution, in milliseconds.
+	 * @param budget - Time budget for this phase, in milliseconds.
 	 * @param ctx - Per-frame execution context (created at frame start, released
 	 *   at frame end).
+	 * @param phase - The phase being executed.
+	 * @param phaseWork - The phase's registered work, ordered at schedule build.
+	 *   Type settles with the {@link FrameScheduler} schedule shape.
+	 * @returns Usage aggregated per category / system / worker for this phase.
+	 */
+	public executePhase(budget: number, ctx: FrameContext, phase: PhaseT, phaseWork: unknown): PhaseUsage {
+		void budget;
+		void ctx;
+		void phase;
+		void phaseWork;
+		throw new Error('FrameExecutor.executePhase not implemented');
+	}
+
+	/**
+	 * Execute a category: walk its registered systems within `budget` and return
+	 * the category-level usage rollup.
+	 *
+	 * @param budget - Time budget for this category, in milliseconds.
+	 * @param ctx - Per-frame execution context.
 	 * @param category - The category to execute. Type settles with the registry
 	 *   taxonomy.
+	 * @returns Usage aggregated per system / worker for this category.
 	 */
-	public executeCategory(budget: number, ctx: FrameContext, category: unknown): void {
+	public executeCategory(budget: number, ctx: FrameContext, category: unknown): CategoryUsage {
 		void budget;
 		void ctx;
 		void category;
@@ -60,14 +92,17 @@ export class FrameExecutor<PhaseT extends string = string> {
 	}
 
 	/**
-	 * Execute a system: run its workers in priority order within `budget`.
+	 * Execute a system: walk its registered workers within `budget`, **measuring**
+	 * each via `performance.now()` deltas around {@link executeWorker}, and return
+	 * the system-level usage rollup.
 	 *
-	 * @param budget - Time budget for this execution, in milliseconds.
+	 * @param budget - Time budget for this system, in milliseconds.
 	 * @param ctx - Per-frame execution context.
 	 * @param system - The system to execute. Type settles with the registry
 	 *   taxonomy.
+	 * @returns Usage aggregated per worker for this system.
 	 */
-	public executeSystem(budget: number, ctx: FrameContext, system: unknown): void {
+	public executeSystem(budget: number, ctx: FrameContext, system: unknown): SystemUsage {
 		void budget;
 		void ctx;
 		void system;
@@ -75,36 +110,19 @@ export class FrameExecutor<PhaseT extends string = string> {
 	}
 
 	/**
-	 * Execute a single phase: run all workers assigned to it, in priority order,
-	 * within `budget`.
-	 *
-	 * @param budget - Time budget for this execution, in milliseconds.
-	 * @param ctx - Per-frame execution context.
-	 * @param phase - The phase to execute.
-	 */
-	public executePhase(budget: number, ctx: FrameContext, phase: PhaseT): void {
-		void budget;
-		void ctx;
-		void phase;
-		throw new Error('FrameExecutor.executePhase not implemented');
-	}
-
-	/**
 	 * Execute a single worker function.
 	 *
-	 * Invoked by a parent in the hierarchy ({@link executeCategory} /
-	 * {@link executeSystem} / {@link executePhase}), which is responsible for
-	 * measuring elapsed time around this call — taking `performance.now()` before
-	 * and after to derive the `deltaTime` that represents the worker's actual
-	 * execution time. The executor does not measure itself.
+	 * Invoked by {@link executeSystem}, which measures elapsed time around this
+	 * call — taking `performance.now()` before and after to derive the worker's
+	 * actual consumed time. The executor does not measure itself from within.
 	 *
-	 * @param budget - Time budget for this execution, in milliseconds.
+	 * @param budget - Time budget for this worker, in milliseconds.
 	 * @param ctx - Per-frame execution context.
 	 * @param worker - The worker function to run. Type settles with the registry
 	 *   worker contract (`() => boolean`).
-	 * @returns Whether more work remains for this worker (`true` = more remains).
+	 * @returns This worker's usage (calls + consumed ms) for this frame.
 	 */
-	public executeWorker(budget: number, ctx: FrameContext, worker: unknown): boolean {
+	public executeWorker(budget: number, ctx: FrameContext, worker: unknown): WorkerUsage {
 		void budget;
 		void ctx;
 		void worker;

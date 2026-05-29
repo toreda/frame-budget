@@ -7,29 +7,88 @@
 ## Source & tests
 
 - Source: [src/frame/executor.ts](../../src/frame/executor.ts),
-  [context.ts](../../src/frame/context.ts) (`FrameContext`)
+  [context.ts](../../src/frame/context.ts) (`FrameContext`),
+  [usage.ts](../../src/frame/usage.ts) (usage object types)
 - Tests: [tests/frame/executor.spec.ts](../../tests/frame/executor.spec.ts)
 
 ## Purpose
 
 The `FrameExecutor` is the component that **actually does the work**. Where the
-[`FrameScheduler`](./scheduler.md) only *plans* (resolves how and when work should
-run), the executor *runs* it: each frame it receives the planned work, executes
-it within the available time budget, and reports what completed.
+[`FrameScheduler`](./scheduler.md) only *plans* (resolves how and when work
+should run), the executor *runs* it: each frame the broker hands it a phase's
+planned work, the executor walks the taxonomy and runs the worker functions,
+measures how much time each consumed, and returns the aggregated measurements.
 
-It is a **decoupled component**: it maintains its own state and does **not** talk
-to the scheduler or registry. The [`FrameBroker`](./broker.md) orchestrator hands
-it the plan to run and collects the results — the executor never pulls from the
-scheduler itself.
+It is a **stateless, decoupled component**: it holds **no state of its own**
+across calls and does **not** talk to the scheduler or registry. The
+[`FrameBroker`](./broker.md) orchestrator hands it the plan to run and collects
+the results — the executor never pulls from the scheduler itself. All
+cross-execution state for the frame lives in the
+[`FrameContext`](../../src/frame/context.ts) (`ctx`) passed in, which the broker
+creates at frame start and releases at frame end.
+
+> **The executor strictly iterates and executes — nothing else.** No sorting, no
+> priority resolution, no allocation decisions happen here. Ordering is baked
+> into the schedule at build time (see [scheduler](./scheduler.md)); the executor
+> walks the already-ordered structure it is given. Its one extra job is
+> **measurement**: it must return the consumption stats the scheduler needs to
+> adapt.
+
+## Execution hierarchy
+
+The broker iterates phases and, for each, calls **`executePhase`**. Execution
+then descends the taxonomy, each level receiving the **minimum scoped
+information** it needs:
+
+```
+executePhase(schedule, ctx, phaseWorkers)
+  └─ for each category (in schedule order):  executeCategory(...)
+       └─ for each system in category:        executeSystem(...)
+            └─ for each worker in system:      executeWorker(...)
+```
+
+- **`executePhase`** — entry point per phase; iterates the phase's registered
+  categories.
+- **`executeCategory`** — iterates the category's registered systems.
+- **`executeSystem`** — iterates the system's registered workers.
+- **`executeWorker`** — runs **one** worker function. Its caller (the
+  `executeSystem` parent) is responsible for **measuring** it: take
+  `performance.now()` immediately before and after the call; the delta is that
+  worker's consumed `deltaTime`. The executor measures around `executeWorker`,
+  not inside it.
+
+> **Iterate only what's registered.** A phase iterates the categories / systems
+> / workers actually **registered** to it — once per phase. A phase with no
+> registered workers has **0 objects to iterate** (no empty-loop cost). The
+> heavy lifting (sorting into priority order) never happens during execution —
+> only on [schedule build](./scheduler.md#schedule-build).
+
+## Usage object
+
+Every `execute*` call returns a **usage object** describing what ran, aggregated
+**bottom-up** through the hierarchy:
+
+- **per worker** — call count + summed ms consumed for that worker;
+- **per system** — totals across its workers;
+- **per category** — totals across its systems;
+- **per phase** — totals across its categories.
+
+`executePhase` returns the phase-level rollup (with the nested per-category /
+per-system / per-worker breakdown). The broker accumulates these across the
+frame's phases and hands the result to
+[`scheduler.updateUsage(consumed)`](./scheduler.md#public-surface--the-broker-contract), which drives the
+adaptive budget updates. **The executor must return measured consumption** —
+without it the schedule cannot adapt.
 
 ## Responsibilities
 
-- Receive the planned work for the frame from the [`FrameBroker`](./broker.md)
-  orchestrator (already in priority/phase order).
-- Execute that work for the current frame.
-- **Report what completed** (and time consumed) back to the orchestrator, which
-  relays it to the scheduler so it can re-plan (e.g. advance a phase when its
-  work drains).
+- Receive a phase's planned work for the frame from the
+  [`FrameBroker`](./broker.md) (already in priority order from schedule build).
+- Walk `category → system → worker` and execute the worker functions, passing
+  each level its minimum scoped information.
+- **Measure** each worker via `performance.now()` deltas around `executeWorker`.
+- **Return the usage object** (call counts + ms, aggregated per worker / system /
+  category / phase) so the broker can feed the scheduler.
 - Stop when the frame's time budget is exhausted; remaining work is deferred to
   the next frame.
 
@@ -46,14 +105,22 @@ scheduler itself.
 
 ## Open questions
 
-- Granularity of the orchestrator cycle: does `FrameBroker` hand the executor
-  **one unit at a time** (calling back to the scheduler between each, enabling
-  reactive re-resolution mid-frame), or a **batch/plan** for the whole frame?
-  This is really a [`FrameBroker`](./broker.md) (cycle) question.
-- Where remaining-time tracking lives (see [broker.md](./broker.md)).
-- Worker invocation contract: how does a worker do partial work and yield
-  (generator, `step()`, return "more remaining")? This is shared with the
-  [registry](./registry.md) open questions.
-- How is "complete" defined and signaled — per worker, per unit of work?
 - Error handling when a worker throws mid-execution: skip, retry, unregister?
+  (Does the usage object still record the partial `deltaTime` up to the throw?)
+- Mid-phase budget exhaustion: does `executeWorker` get a remaining-budget
+  argument so it can decline to start, or does the parent stop iterating once
+  the running total reaches budget?
+
+### Resolved
+
+- **Cycle granularity** — the broker hands the executor a **whole phase** at a
+  time (`executePhase`), not one unit; reactive re-resolution happens between
+  frames via `getSchedule()`/`updateUsage()`, not mid-phase.
+- **Remaining-time / measurement ownership** — the executor measures
+  (`performance.now()` deltas around `executeWorker`) and returns the
+  [usage object](#usage-object); the scheduler adapts from it.
+- **Worker invocation contract** — a worker is `() => boolean` (bounded chunk;
+  `true` = more remains), resolved in
+  [adaptive-budget.md](../features/adaptive-budget.md#worker-contract). The
+  boolean is both the "complete?" and demand signal.
 </content>

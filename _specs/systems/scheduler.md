@@ -42,6 +42,37 @@ change during the frame, including:
 In other words, "who goes next" is resolved repeatedly as the frame progresses,
 not fixed up front.
 
+## Public surface — the broker contract
+
+The scheduler exposes exactly two methods to the [`FrameBroker`](./broker.md);
+the broker calls them once per frame and nothing else touches the scheduler.
+
+- **`getSchedule()`** — return the current plan for the broker to execute this
+  frame. Internally it calls a private **`build()`** to (re)compute the
+  priority-ordered structure, but **only when something changed** — a
+  registration/unregistration, a config/priority edit, or usage statistics that
+  shifted enough to matter. When nothing changed it returns the cached schedule.
+  **Sorting / priority resolution happens here, never during execution.**
+- **`updateUsage(consumed)`** — accept the [usage object](./executor.md#usage-object)
+  the executor measured (call counts + ms, aggregated per worker / system /
+  category / phase), relayed by the broker. This feeds the adaptive stepping and
+  usage statistics, and **invalidates the cached schedule** when the shift is
+  large enough to warrant a rebuild on the next `getSchedule()`.
+
+### Schedule build
+
+`build()` is the **only** place ordering work happens. It reads the
+[`FrameRegistry`](./registry.md) and produces the per-phase, priority-ordered
+`category → system → worker` structure the executor walks. Because the executor
+strictly iterates, all sorting cost is paid here — on change — not per frame.
+
+**Batching for performance.** `updateUsage` need not trigger a rebuild every
+frame. The scheduler **may batch** usage and actually recompute only every `n`
+frames: a single frame that slightly exceeds budget and returns to normal the
+next frame is cheaper than rebuilding the schedule every frame. The rebuild is
+the expensive operation to amortize; per-frame spending against an existing
+schedule is cheap.
+
 ## What it allocates against
 
 Work is organized by the registry's taxonomy `category.system.worker`, and each
@@ -49,8 +80,10 @@ node carries `priority` and an adaptive budget range. The scheduler spends the
 frame's [`FrameBroker`](./broker.md) budget across these nodes.
 
 > **Allocation is adaptive, not static.** Rather than fixed per-node ms limits,
-> the scheduler measures actual execution (`performance.now()` deltas around each
-> worker callback) and dynamically reallocates via a **two-pool model**
+> the scheduler adapts from the executor's measured execution
+> (`performance.now()` deltas around each worker callback, returned via
+> [`updateUsage`](#public-surface--the-broker-contract)) and dynamically
+> reallocates via a **two-pool model**
 > (dedicated + shared) with a per-node range `fixedMin ≤ adaptiveMin ≤ max`. The
 > full model — worker contract, two pools, shared-gated stepping, the `fixedMin`
 > artifact-protection floor, and the decay-weighted lookback window — is

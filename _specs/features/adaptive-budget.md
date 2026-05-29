@@ -73,13 +73,21 @@ require. Set optionally at registration; defaults to
   rule divide-safe with no special-casing.
 - **Default `20`** leaves ample room to drop *below* the baseline (down to `0`)
   for low-priority work, and to raise above it for elevated work.
+- **Carried at every taxonomy level.** Categories and systems have a `priority`
+  too, not just workers — each level's iteration is ordered by it.
+- **Alphabetical tie-break.** Equal priorities break by node **name**
+  (ascending). Consequence: if nothing sets `priority`, every node sits at the
+  default `20` and execution order is purely **alphabetical** — a deterministic,
+  predictable baseline a consumer overrides only where order actually matters.
 
 `priority` drives three things, all consistent under "higher = more important":
 
 1. **Walk order (who resolves first).** Resolving budget portions walks
-   contenders in **descending priority** — the most important resolve first,
-   claiming budget while the pool is fullest. (Conceptually "sort and walk";
-   top-down so important work is served first.)
+   contenders in **descending priority** (name-ascending on ties) — the most
+   important resolve first, claiming budget while the pool is fullest.
+   (Conceptually "sort and walk"; top-down so important work is served first.
+   The sort is paid once at [schedule build](../systems/scheduler.md#schedule-build),
+   never during execution.)
 2. **Shared-pool weight** — proportional surplus via `priority / Σ priority`
    (see [two-pool model](#the-two-pool-model)).
 3. **Overflow shedding** — highest-priority `fixedMin` guarantees are honored
