@@ -208,17 +208,180 @@ brokers.
   update scheduler with consumed time/results.
 - Supply the per-frame time budget (derived from target FPS or set directly).
 
+## Sole public entry point
+
+`FrameBroker` is the package's **only** public-facing surface. The
+[`FrameRegistry`](./registry.md), [`FrameScheduler`](./scheduler.md), and
+[`FrameExecutor`](./executor.md) are **internal** — the broker owns them and is
+the only thing that touches them. Consumers never hold a registry reference; they
+register through the broker. Routing every consumer operation (worker
+registration, phase registration, budget config) through the broker guarantees
+any resulting state changes, schedule rebuilds, or housekeeping are **always
+performed or queued as part of the call** (the broker funnels them through a
+single private `onRegistryChanged()` seam), rather than leaving a component in a
+state the broker doesn't know about.
+
+### Worker registration → unsubscribe
+
+The single methods are the **only** code paths; the bulk methods are thin
+wrappers that iterate and call them, so validation and housekeeping happen
+identically per worker (no duplicated logic).
+
+- **`registerWorker(path, init, forceScheduleUpdate?): Unsubscribe`** — the
+  singular add path. `init` is a **`WorkerInit`** descriptor
+  `{name, fn, phase, config?}` (the registration *input* shape, distinct from the
+  stored `Worker` node). Delegates to the internal registry (ensure-path),
+  validates `init.phase` against the broker's phase set (**throws** on an unknown
+  phase), then runs housekeeping. Returns an **`Unsubscribe`** (`() => boolean`)
+  that removes the worker when invoked; **idempotent** (first call `true`, then
+  `false`). The handle delegates to `unregisterWorker`. _(Implemented.)_
+- **`registerWorkers(path, inits, forceScheduleUpdate?): Unsubscribe[]`** —
+  register many workers under the **same owning `path`** in one call (phase still
+  per-worker via each `init`). Wraps `registerWorker`; returns one handle per
+  input, in order; `forceScheduleUpdate` is applied **once after the batch**. If
+  an `init` has an unknown phase it throws on that item (earlier items stay
+  registered). _(Implemented. Note: `inits` is an array param, not rest, so the
+  trailing `forceScheduleUpdate` is expressible.)_
+- **`unregisterWorker(path, name, phase): boolean`** — the singular removal path:
+  registry delete (with **tombstone**, see below) + housekeeping if anything was
+  removed. `true` if removed. _(Implemented.)_
+- **`unregisterWorkers(...refs): boolean[]`** — remove many; `refs` are
+  **`WorkerRef`** descriptors `{path, name, phase}`. Wraps `unregisterWorker`;
+  one result per input, in order. _(Implemented.)_
+- **`unregisterAll()`** — bulk teardown that tombstones and drops the entire
+  tree. Lives on the **registry**; the broker calls it on shutdown. **Not exposed
+  on the broker's public surface yet** (TBD — revisit with the lifecycle
+  delegate). _(Registry: implemented.)_
+
+### Mid-frame register / unregister timing
+
+Registration mutates the registry **immediately**, but the schedule the executor
+walks is a separate cached structure rebuilt lazily. The two directions are
+asymmetric:
+
+- **Register mid-frame** — the worker is added at once but is **not** in this
+  frame's already-fetched schedule, so it naturally first runs **next** frame.
+  `onRegistryChanged()` calls `scheduler.markDirty()`; the rebuild is deferred.
+- **`forceScheduleUpdate`** — the rare escape hatch: when `true`, the broker
+  calls `scheduler.rebuildIfDirty()` to rebuild **synchronously now** so the new
+  worker runs **this** frame. Pays the sort cost immediately; reserve for cases
+  that genuinely require same-frame execution.
+- **Unregister mid-frame (tombstone)** — harder, because the removed worker may
+  **still be present in this frame's live schedule**. A naive removal would let
+  the executor invoke it after the caller unsubscribed — dangerous if the
+  unsubscribe was tearing the worker's state down. So `unregister` **tombstones**
+  the worker (`alive = false`) before deleting it; because the schedule
+  references the same `Worker` objects, the [executor](./executor.md#tombstone-skip)
+  checks `alive` and **skips** tombstoned workers. This guarantees an
+  unsubscribed worker never runs again this frame and that a torn-down `fn` is
+  never called — one boolean read per worker, no allocation.
+
+> **Not in tension with [DEC-001](../decisions.md#dec-001--components-communicate-by-direct-calls--returns-not-events).**
+> The unsubscribe handle and the lifecycle hooks below are **not** per-frame: a
+> registration happens at setup, and lifecycle milestones fire **once** over the
+> system's lifetime (see below). DEC-001 governs the **per-frame hot path** only;
+> neither touches it.
+
+### Phase registration
+
+- **`addPhase(phase): boolean`** — append a phase to the **end** of the
+  execution order. Phases are **permanent**: there is no removal counterpart, and
+  re-adding an existing phase is a no-op (`false`). Allowed **only before the
+  broker is running** — `addPhase` after [`start()`](#lifecycle-seam) **throws**,
+  since the run loop iterates a fixed phase order. _(Implemented.)_
+- **`get phases(): readonly PhaseT[]`** / **`isValidPhase(phase)`** — read-only
+  view of the order and the validity check. _(Implemented.)_
+
+### Lifecycle seam
+
+- **`start(): void`** / **`get isRunning(): boolean`** — minimal running-state
+  seam: `start()` locks the phase set and is idempotent. This is a placeholder
+  for the full lifecycle (below). _(Implemented as a stub.)_
+
+### Debug snapshots
+
+Two **debug-only inspection** methods that return a **plain-data copy** of
+current state — for printing, logging, or asserting in a test. Both are pure
+copies: the returned value shares **no** references with live broker internals
+(no `Map`s, no `Worker`/`fn` references), so inspecting or `JSON.stringify`ing it
+cannot mutate state or invoke a worker. They delegate to the component each
+mirrors.
+
+> **Heavy — not for normal operation.** Each call walks and allocates a fresh
+> copy of the relevant state. They are diagnostics tools; do **not** call them on
+> the per-frame hot path (ideally not every frame at all). This keeps them clear
+> of [DEC-001](../decisions.md#dec-001--components-communicate-by-direct-calls--returns-not-events)'s
+> per-frame concern.
+
+- **`registrySnapshot(): RegistrySnapshot`** — deep copy of the worker
+  registration tree (delegates to [`registry.snapshot()`](./registry.md#internal-surface-broker-facing)).
+  Each worker's live `fn` is reduced to a `hasFn` boolean. `undefined` when
+  nothing is registered. _(Implemented.)_
+- **`scheduleSnapshot(): ScheduleSnapshot`** — copy of the scheduler's current
+  state (delegates to [`scheduler.snapshot()`](./scheduler.md#debug-snapshot)).
+  **Partial today:** the built plan does not exist yet, so it reports only
+  `built` (always `false`) / `dirty`, with a reserved `plan` stub (`undefined`)
+  to be filled once the schedule shape is finalized. _(Implemented as a state-only
+  stub.)_
+
+## Lifecycle (`@toreda/lifecycle`)
+
+> **Planned — not yet implemented.** The running-state seam above is the
+> placeholder.
+
+`FrameBroker` (and its child components) will implement a **`@toreda/lifecycle`**
+delegate (likely **`ClientDelegate`**) to drive engine-style startup/shutdown.
+Lifecycle methods are **multi-stage milestones invoked once per event over the
+system's whole lifetime** — `clientWillInit` fires exactly once, never per frame
+— which is precisely why they give natural, one-time points to set up frame
+budgeting, build the initial schedule, and tear down.
+
+Mapping onto the broker:
+
+- **Startup milestones** (`clientWillInit` → `clientOnInit` → `clientDidInit`,
+  loading/starting, …) — set up the registry/scheduler/executor wiring, build the
+  initial schedule, and `start()` the broker. Each is the natural home for the
+  corresponding one-time setup.
+- **Once running**, no further setup milestones fire — only **pause** and
+  **shutdown** events do. This is what makes locking the phase set on `start()`
+  correct.
+- **Shutdown** (`clientWillStop` / `clientWillShutdown`) — stop the broker and
+  **unregister all workers** so nothing is retained after the host tears down
+  (leak prevention). The registry's `unregister` / the unsubscribe handles are
+  the mechanism.
+
+Delegate shape (verified against `@toreda/lifecycle@2.2.1`): a delegate is a
+**type alias** — `Partial<Record<ClientPhase, LifecycleListener>> &
+LifecycleDelegateCommon` — so the broker provides a `lifecycle` instance, a
+`reset()`, optional `children`, and any subset of the ~27 optional phase
+listeners (`LifecycleListener = (args?) => boolean | Promise<boolean>`, async
+supported). `children` are invoked recursively, mapping onto **broker →
+child-component** fan-out (each child component implements the same delegate and
+runs its slice of each milestone).
+
+Open: whether `ClientDelegate` suffices or a custom delegate domain is warranted,
+and exactly which subset of phases the broker vs. children implement.
+
 ## Intended public surface (draft)
 
-> Phase + FPS/budget surface is implemented (see
-> [Per-frame time budget](#per-frame-time-budget)); the per-frame cycle is not.
+> Phase + FPS/budget surface and the registration/phase API are implemented; the
+> per-frame cycle and full lifecycle are not.
 
 - Construct from a target FPS and budget percentage; owns the three components.
   _(Implemented: `init.fps` / `init.budgetPct`.)_
+- Register work and get an unsubscribe handle: `registerWorker(path, init)` and
+  bulk `registerWorkers(path, ...inits)`; remove via `unregisterWorker(...)` /
+  `unregisterWorkers(...)`. _(Implemented.)_
+- Grow the phase order: `addPhase` (permanent, pre-run only). _(Implemented.)_
 - Adjust the budget at runtime: `setFps(fps, budgetPct?)` and `setBudgetPct`.
   _(Implemented.)_
 - A per-frame tick/update entry point that runs the cycle above. _(TODO.)_
+- Lifecycle startup/shutdown via a `@toreda/lifecycle` delegate. _(TODO; `start`
+  / `isRunning` stub exists.)_
 - Access to the budget value: `get fps` / `get budgetMs`. _(Implemented.)_
+- Debug inspection: `registrySnapshot()` / `scheduleSnapshot()` return plain-data
+  copies of current state (heavy, not per-frame). _(Implemented; schedule
+  snapshot is a state-only stub until the plan shape lands.)_
 
 ## Relationship to other systems
 

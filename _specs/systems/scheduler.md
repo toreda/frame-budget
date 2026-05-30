@@ -44,8 +44,7 @@ not fixed up front.
 
 ## Public surface — the broker contract
 
-The scheduler exposes exactly two methods to the [`FrameBroker`](./broker.md);
-the broker calls them once per frame and nothing else touches the scheduler.
+The scheduler is touched **only** by the [`FrameBroker`](./broker.md):
 
 - **`getSchedule()`** — return the current plan for the broker to execute this
   frame. Internally it calls a private **`build()`** to (re)compute the
@@ -58,6 +57,40 @@ the broker calls them once per frame and nothing else touches the scheduler.
   category / phase), relayed by the broker. This feeds the adaptive stepping and
   usage statistics, and **invalidates the cached schedule** when the shift is
   large enough to warrant a rebuild on the next `getSchedule()`.
+
+### Dirty tracking & forced rebuild
+
+The cached plan is invalidated through a small dirty-flag surface the broker
+drives on registry changes (it is **not** rebuilt on every registration):
+
+- **`markDirty()`** — flag the cached schedule stale (cheap, allocation-free).
+  The broker calls it after **every** register/unregister. The actual rebuild is
+  deferred to the next `getSchedule()` — so a worker registered this frame first
+  runs **next** frame (the intended default).
+- **`rebuildIfDirty(): boolean`** — rebuild **synchronously now** if dirty, then
+  clear the flag. This is the **force** path: the broker calls it when a caller
+  passed `forceScheduleUpdate` and needs a just-registered worker to run the
+  *same* frame. It pays the sort cost immediately, so forcing is reserved for
+  rare cases.
+- **`isDirty`** — whether a rebuild is pending. Starts `true` (nothing built
+  yet).
+
+> Status: implemented as plumbing; `build()` is a safe no-op placeholder until
+> the schedule shape and sorting land.
+
+### Debug snapshot
+
+- **`snapshot(): ScheduleSnapshot`** — a plain-data **copy** of the scheduler's
+  current state for debugging (printing / asserting / `JSON.stringify`), sharing
+  no identity with the scheduler's internals. **Partial today:** because
+  `build()` is a no-op there is no built plan to copy, so it reports only the
+  observable `built` (always `false`) and `dirty` state; its `plan` field is a
+  **reserved stub** (`undefined`) that will carry the ordered phase → node →
+  worker structure as plain data once the [schedule build](#schedule-build) lands.
+  **Heavy / not per-frame** — a diagnostics tool. Surfaced publicly via
+  [`broker.scheduleSnapshot()`](./broker.md#debug-snapshots). Type in
+  [src/schedule/snapshot.ts](../../src/schedule/snapshot.ts).
+  **Implemented (stub: state only, no plan).**
 
 ### Schedule build
 

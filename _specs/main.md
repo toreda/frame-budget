@@ -24,19 +24,24 @@ The package lets callers register chunks of work and drains them incrementally,
 spending only up to the remaining budget each frame and deferring the rest to
 subsequent frames — keeping frame times under budget and the engine smooth.
 
-Work is organized in a `category → system → worker` taxonomy, each node carrying
-a priority and min/max budget, and each worker assigned to a **phase** that lets
-execution be split into priority-ordered, stage-by-stage buckets. Four systems
+Work is organized as a single **arbitrary-depth tree** of `RegistryNode`s (each
+node carries a priority and owns both workers and child nodes; `category →
+system → worker` is just a common depth-3 example). Each worker is tagged with a
+**phase**; phases run in order, letting execution be split into priority-ordered,
+stage-by-stage buckets so a later phase can depend on an earlier one. Four systems
 collaborate, each frame: registry `onUpdate` → scheduler `onUpdate` → executor
 runs work.
 
-- **`FrameBroker`** — top-level orchestrator / parent container. Owns the other
-  three and drives the per-frame cycle, **brokering** all interaction between
-  them: they are fully decoupled and never talk to each other directly. (Name is
+- **`FrameBroker`** — top-level orchestrator / parent container **and the
+  package's sole public entry point**. Owns the other three (which are internal)
+  and drives the per-frame cycle, **brokering** all interaction between them:
+  they are fully decoupled and never talk to each other directly. Consumers
+  register work, add phases, and configure the budget through the broker; it also
+  implements a `@toreda/lifecycle` delegate for startup/shutdown. (Name is
   internal; the end-user-facing name is deferred.)
-- **`FrameRegistry`** — public entry point and passive store of the
-  taxonomy, per-node config, and worker functions. External parties register
-  themselves here; it can be global or injected per system.
+- **`FrameRegistry`** — **internal** passive store of the work tree, per-node
+  config, and worker functions, owned by the broker. Consumers register via
+  `broker.registerWorker(...)`, not against the registry directly.
 - **`FrameScheduler`** — planning engine; reads the registry and maintains a reactive
   plan of who-goes-next (priority, active rules, guaranteed min budget, current
   phase). Plans, does not execute.
@@ -61,33 +66,38 @@ read its spec, then open the source/test files it points to.
 
 ## Systems
 
-| System | Spec | Source | Tests |
-| --- | --- | --- | --- |
-| `FrameBroker` (orchestrator) | [systems/broker.md](systems/broker.md) | [src/frame/broker.ts](../src/frame/broker.ts), [init.ts](../src/frame/broker/init.ts) | [tests/frame/broker.spec.ts](../tests/frame/broker.spec.ts) |
-| `FrameRegistry` | [systems/registry.md](systems/registry.md) | [src/frame/registry.ts](../src/frame/registry.ts) | [tests/frame/registry.spec.ts](../tests/frame/registry.spec.ts) |
-| `FrameScheduler` | [systems/scheduler.md](systems/scheduler.md) | [src/frame/scheduler.ts](../src/frame/scheduler.ts) | [tests/frame/scheduler.spec.ts](../tests/frame/scheduler.spec.ts) |
-| `FrameExecutor` | [systems/executor.md](systems/executor.md) | [src/frame/executor.ts](../src/frame/executor.ts), [context.ts](../src/frame/context.ts) | [tests/frame/executor.spec.ts](../tests/frame/executor.spec.ts) |
+| System                       | Spec                                         | Source                                                                                   | Tests                                                             |
+| ---------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `FrameBroker` (orchestrator) | [systems/broker.md](systems/broker.md)       | [src/frame/broker.ts](../src/frame/broker.ts), [init.ts](../src/frame/broker/init.ts)    | [tests/frame/broker.spec.ts](../tests/frame/broker.spec.ts)       |
+| `FrameRegistry`              | [systems/registry.md](systems/registry.md)   | [src/frame/registry.ts](../src/frame/registry.ts)                                        | [tests/frame/registry.spec.ts](../tests/frame/registry.spec.ts)   |
+| `FrameScheduler`             | [systems/scheduler.md](systems/scheduler.md) | [src/frame/scheduler.ts](../src/frame/scheduler.ts)                                      | [tests/frame/scheduler.spec.ts](../tests/frame/scheduler.spec.ts) |
+| `FrameExecutor`              | [systems/executor.md](systems/executor.md)   | [src/frame/executor.ts](../src/frame/executor.ts), [context.ts](../src/frame/context.ts) | [tests/frame/executor.spec.ts](../tests/frame/executor.spec.ts)   |
 
 ## Features
 
-| Feature | Spec | Systems involved |
-| --- | --- | --- |
+| Feature                    | Spec                                                       | Systems involved                                                                                                                 |
+| -------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | Adaptive budget allocation | [features/adaptive-budget.md](features/adaptive-budget.md) | FrameScheduler (allocation/adaptation), FrameRegistry (callback registration + config), FrameBroker (frame budget + diagnostics) |
 
 ## Repository layout
 
-| Path | Purpose |
-| --- | --- |
-| [src/](../src/) | TypeScript source. Public API barrel: [src/index.ts](../src/index.ts). |
-| `tests/` | Tests mirroring `src/` paths, named `*.spec.ts` (e.g. `src/frame/broker.ts` → `tests/frame/broker.spec.ts`, `src/frame/registry.ts` → `tests/frame/registry.spec.ts`). |
-| `_specs/systems/` | One spec per major system. |
-| `_specs/features/` | Feature specs (cross-system requirements + plans). |
-| [_specs/decisions.md](decisions.md) | Project-level design decision log. |
+| Path                                 | Purpose                                                                                                                                                                |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [src/](../src/)                      | TypeScript source. Public API barrel: [src/index.ts](../src/index.ts).                                                                                                 |
+| `tests/`                             | Tests mirroring `src/` paths, named `*.spec.ts` (e.g. `src/frame/broker.ts` → `tests/frame/broker.spec.ts`, `src/frame/registry.ts` → `tests/frame/registry.spec.ts`). |
+| `_specs/systems/`                    | One spec per major system.                                                                                                                                             |
+| `_specs/features/`                   | Feature specs (cross-system requirements + plans).                                                                                                                     |
+| [\_specs/decisions.md](decisions.md) | Project-level design decision log.                                                                                                                                     |
 
 ## Status
 
-Early scaffolding. `FrameBroker` has its FPS/budget surface implemented and
-tested; `FrameRegistry` and `FrameScheduler` are empty stubs; `FrameExecutor` is
+Early scaffolding. `FrameBroker` has its FPS/budget surface plus the public
+registration API (`registerWorker` → unsubscribe, `addPhase`, `start`/
+`isRunning`) implemented and tested; the internal `FrameRegistry` has worker
+registration/unregistration into a shared **arbitrary-depth** `RegistryNode` tree
+(phase tagged per worker) with ensure-path node creation implemented and tested;
+the per-frame cycle and `@toreda/lifecycle` delegate are not yet built.
+`FrameScheduler` is an empty stub; `FrameExecutor` is
 a scaffold with method signatures (`executeCategory`/`executeSystem`/
 `executePhase`/`executeWorker`) but no behavior yet, plus its `FrameContext`
 seam. All four have placeholder tests. Specs exist for all four systems plus the

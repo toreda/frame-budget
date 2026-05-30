@@ -1,5 +1,8 @@
+import {type CategoryUsage} from '../category/usage.js';
+import {type PhaseUsage} from '../phase/usage.js';
+import {type SystemUsage} from '../system/usage.js';
+import {type WorkerUsage} from '../worker/usage.js';
 import {type FrameContext} from './context.js';
-import {type CategoryUsage, type PhaseUsage, type SystemUsage, type WorkerUsage} from './usage.js';
 
 /**
  * Performs the **stateless execution** of registered worker functions for a
@@ -101,6 +104,14 @@ export class FrameExecutor<PhaseT extends string = string> {
 	 * @param system - The system to execute. Type settles with the registry
 	 *   taxonomy.
 	 * @returns Usage aggregated per worker for this system.
+	 *
+	 * **Tombstone skip (required).** A worker unregistered mid-frame is still
+	 * present in this frame's already-built schedule. Before invoking each
+	 * worker's `fn`, this loop MUST check the worker's `alive` flag (set `false`
+	 * on unregister) and **skip** any tombstoned worker — a single boolean read,
+	 * no allocation. This guarantees an unsubscribed worker never runs again this
+	 * frame and that a torn-down `fn` is never called. See
+	 * `_specs/systems/executor.md` → tombstone skip.
 	 */
 	public executeSystem(budget: number, ctx: FrameContext, system: unknown): SystemUsage {
 		void budget;

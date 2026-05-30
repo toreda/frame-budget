@@ -7,8 +7,12 @@
 ## Source & tests
 
 - Source: [src/frame/executor.ts](../../src/frame/executor.ts),
-  [context.ts](../../src/frame/context.ts) (`FrameContext`),
-  [usage.ts](../../src/frame/usage.ts) (usage object types)
+  [context.ts](../../src/frame/context.ts) (`FrameContext`), and the usage object
+  types — [`PhaseUsage`](../../src/phase/usage.ts),
+  [`CategoryUsage`](../../src/category/usage.ts),
+  [`SystemUsage`](../../src/system/usage.ts),
+  [`WorkerUsage`](../../src/worker/usage.ts),
+  [`NodeUsage`](../../src/node/usage.ts)
 - Tests: [tests/frame/executor.spec.ts](../../tests/frame/executor.spec.ts)
 
 ## Purpose
@@ -62,6 +66,23 @@ executePhase(schedule, ctx, phaseWorkers)
 > registered workers has **0 objects to iterate** (no empty-loop cost). The
 > heavy lifting (sorting into priority order) never happens during execution —
 > only on [schedule build](./scheduler.md#schedule-build).
+
+## Tombstone skip
+
+A worker unregistered **mid-frame** is removed from the registry immediately, but
+the schedule the executor is currently walking is a separate cached structure
+that still references that worker (see
+[broker → mid-frame register/unregister](./broker.md#mid-frame-register--unregister-timing)).
+To prevent it running after the caller unsubscribed — and to make
+unsubscribe-to-tear-down safe — each worker carries an **`alive`** flag, flipped
+to `false` the instant it is unregistered.
+
+> **Required:** before invoking a worker's `fn`, the executor (in `executeSystem`,
+> which iterates workers) MUST check `alive` and **skip** any worker where it is
+> `false`. It is a single boolean read per worker — no allocation, negligible on
+> the hot path. This guarantees an unsubscribed worker never runs again the same
+> frame, even if removed after the schedule was fetched, and that a disposed `fn`
+> is never called.
 
 ## Usage object
 
